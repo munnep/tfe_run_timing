@@ -107,7 +107,19 @@ The "Matched by" column in the CLI and API table shows for each row whether it w
 
 If the section cannot be built, it says "Not available" and gives the reason, for example a missing agent log or input from a pipe. The rest of the report is not affected.
 
-## Example
+## Example reports
+
+The [`example_reports/`](example_reports/) directory has full reports, one for each way a run can start. They were made with this script from the logs of a test system. Open them next to the explanation in [Before the run was created](#before-the-run-was-created) to see what each type looks like.
+
+| File | Run started by | What is special about "Before the run was created" |
+|---|---|---|
+| [`cli-driven.md`](example_reports/cli-driven.md) | The Terraform CLI (`terraform plan`/`apply`) | A table of the token's calls up to `POST /api/v2/runs`: service discovery, ping, workspace lookup, configuration version create and upload, run create. Configuration version **confirmed**. |
+| [`api-driven.md`](example_reports/api-driven.md) | An API client that creates and uploads a configuration version, after which TFE creates the run | The same table for the token that created the configuration version, ending with the row `TFE queues the run`. There is no run-create request. |
+| [`vcs-driven.md`](example_reports/vcs-driven.md) | A push to the connected repository (webhook) | Steps instead of API calls: webhook received, configuration version created, the `vcs-ingress` agent job cloning the repository, the upload and the run queued. The webhook is matched by time only. |
+
+The other sections (summary, state changes, agent time per stage, timeline, API calls, errors and log reads) have the same layout in all three.
+
+### Short example
 
 A trimmed report for a CLI run (values are from a test system):
 

@@ -2,6 +2,22 @@
 
 Two bash scripts that turn Terraform Enterprise (TFE) log files into markdown reports.
 
+## Contents
+
+- [`run_timing.sh`](#run_timingsh): timing report for one run
+  - [Quick start](#quick-start)
+  - [Usage](#usage)
+  - [Which logs it uses](#which-logs-it-uses)
+  - [What the report contains](#what-the-report-contains)
+  - [Before the run was created](#before-the-run-was-created)
+  - [Example reports](#example-reports)
+  - [Limitations](#limitations)
+  - [Troubleshooting](#troubleshooting)
+- [`run_summary.sh`](#run_summarysh): summary of all runs
+  - [What the summary report contains](#what-the-summary-report-contains)
+  - [How the status is found](#how-the-status-is-found)
+  - [Limits](#limits)
+
 | Script | Question it answers | Output |
 |---|---|---|
 | [`run_summary.sh`](#run_summarysh) | How many runs are there, and how did they end? | Number of runs, percentage per status, split per workflow. `--full` adds one row per run. |

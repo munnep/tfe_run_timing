@@ -1,13 +1,38 @@
-# run_timing.sh
+# TFE run tools
+
+Two bash scripts that turn Terraform Enterprise (TFE) log files into markdown reports.
+
+| Script | Question it answers | Output |
+|---|---|---|
+| [`run_summary.sh`](#run_summarysh) | How many runs are there, and how did they end? | Number of runs, percentage per status, split per workflow. `--full` adds one row per run. |
+| [`run_timing.sh`](#run_timingsh) | Why did this one run take so long? | Timing report for one run: state changes, agent steps, API calls, steps before the run existed. |
+
+Typical use: run `run_summary.sh` on a support bundle first to see all runs and the ones that need attention (errored, waiting, running), then run `run_timing.sh <run-id>` on a run from that list.
+
+Both scripts:
+
+- are one bash script with no dependencies besides standard tools: `bash`, `grep`, `sed`, `awk`, `sort`;
+- are read-only: they never change the logs and remove their temporary files on exit;
+- read the same log files: a directory (searched in all its subdirectories), single files, or piped lines;
+- skip `*.md` and `*.sh` files, so reports and scripts can sit in the same directory;
+- remove exact duplicate lines;
+- write the report to stdout and errors to stderr. All times are UTC, as written in the logs.
+
+Example reports for both scripts are in [`example_reports/`](example_reports/).
+
+| Example | Made with |
+|---|---|
+| [`summary.md`](example_reports/summary.md) | `./run_summary.sh host` |
+| [`summary_full.md`](example_reports/summary_full.md) | `./run_summary.sh --full host` |
+| [`cli-driven.md`](example_reports/cli-driven.md), [`api-driven.md`](example_reports/api-driven.md), [`vcs-driven.md`](example_reports/vcs-driven.md) | `./run_timing.sh <run-id> host` |
+
+## run_timing.sh
 
 Build a timing report for one Terraform Enterprise (TFE) run from the TFE log files.
 
 Give the script a run ID and the logs. It prints a markdown report that shows what happened during the run, when it happened and how long each part took. It also covers the steps before the run existed: the CLI, VCS webhook or API client creating and uploading the configuration version. It is meant for performance investigations ("why did this run take 17 minutes?") and support tickets.
 
-- One bash script, no dependencies besides standard tools: `bash`, `grep`, `sed`, `awk`, `sort`.
-- Read-only. It never changes the logs. Temporary files are removed on exit.
-
-## Quick start
+### Quick start
 
 ```bash
 chmod +x run_timing.sh
@@ -18,7 +43,7 @@ chmod +x run_timing.sh
 
 Open `report.md` in any markdown viewer. The report is plain text with tables, so it can also go straight into a ticket.
 
-## Usage
+### Usage
 
 ```
 ./run_timing.sh [-w MINUTES] <run-id> [file-or-dir ...]   > report.md
@@ -34,7 +59,7 @@ grep run-XXXX * | ./run_timing.sh run-XXXX                > report.md
 
 The report goes to stdout. Errors and warnings go to stderr.
 
-### Input
+#### Input
 
 | Input | Run timeline | "Before the run was created" |
 |---|---|---|
@@ -45,7 +70,7 @@ The steps before the run was created contain no run ID, so the script has to sea
 
 Only text logs are read. Compressed files such as `.log.gz` are not decompressed, so unpack rotated logs first. Markdown and shell files (`*.md`, `*.sh`) are skipped, so the report and the script can sit in the same directory.
 
-## Which logs it uses
+### Which logs it uses
 
 Normal TFE log files, as found under `/var/log/terraform-enterprise` or in a support bundle:
 
@@ -59,7 +84,7 @@ Normal TFE log files, as found under `/var/log/terraform-enterprise` or in a sup
 
 You do not need all of them, but the more you give it the more complete the report is. If a log is missing, the matching part of the report is empty or says why.
 
-## What the report contains
+### What the report contains
 
 All times are UTC, as written in the logs.
 
@@ -73,7 +98,7 @@ All times are UTC, as written in the logs.
 8. **Responses with status 400 or higher**: errors seen in atlas and nginx.
 9. **Log reads**: plan/apply log fetches through archivist and nginx, which shows whether someone was watching the run.
 
-### How to read it
+#### How to read it
 
 - **Start with the Summary.** It shows where the time went. A single step that takes most of the run, such as `Running terraform apply` at 89%, is the finding.
 - **Elapsed** in the timeline is counted from run create. **Step took** is the time from that agent line to the next agent line of the same stage. A large value on a line means that step was slow. The line itself is only the start marker.
@@ -81,11 +106,11 @@ All times are UTC, as written in the logs.
 - **Agent time per stage** compares Plan and Apply directly. Remember that init, plugin download and "Extracting Terraform from release archive" are part of the stage.
 - **Audit and atlas lines are whole seconds.** Treat durations from them as plus or minus 1 second. Agent and archivist lines have millisecond precision.
 
-### What the logs cannot tell you
+#### What the logs cannot tell you
 
 The agent logs `Running terraform apply` (or `plan`) as one step. The output of terraform itself, such as resources being created and "Still creating...", is not in the TFE log files. It is stored as the plan/apply log of the run. If one step takes most of the time, get that log from the UI or from `GET /api/v2/applies/<apply-id>/log` (`/plans/<plan-id>/log` for the plan) to see which resource or provider was slow.
 
-## Before the run was created
+### Before the run was created
 
 The calls before a run exists carry no run ID, so the script finds them in a second pass over the original logs. How a run starts decides what is shown. The script detects the type itself:
 
@@ -107,7 +132,7 @@ The "Matched by" column in the CLI and API table shows for each row whether it w
 
 If the section cannot be built, it says "Not available" and gives the reason, for example a missing agent log or input from a pipe. The rest of the report is not affected.
 
-## Example reports
+### Example reports
 
 The [`example_reports/`](example_reports/) directory has full reports, one for each way a run can start. They were made with this script from the logs of a test system. Open them next to the explanation in [Before the run was created](#before-the-run-was-created) to see what each type looks like.
 
@@ -119,7 +144,7 @@ The [`example_reports/`](example_reports/) directory has full reports, one for e
 
 The other sections (summary, state changes, agent time per stage, timeline, API calls, errors and log reads) have the same layout in all three.
 
-### Short example
+#### Short example
 
 A trimmed report for a CLI run (values are from a test system):
 
@@ -144,7 +169,7 @@ A trimmed report for a CLI run (values are from a test system):
 | 09:05:12 | +1s | `POST /api/v2/runs` | 201 | 325 ms | `run create run-...` | token |
 ```
 
-## Limitations
+### Limitations
 
 - It reports what is in the logs. Anything TFE does not log, such as the content of the terraform plan/apply output, is not in the report.
 - Matching by token and time is strong but not proof. Only the configuration version link is proof, which is why the report says confirmed or unconfirmed.
@@ -152,7 +177,7 @@ A trimmed report for a CLI run (values are from a test system):
 - Runs without an API token (for example created from the UI with a session) cannot be matched to earlier calls. The section says so.
 - Several log files with the same name in the input (for example copies of a backup) can add duplicate lines. The script removes exact duplicates, but give it one set of logs per run.
 
-## Troubleshooting
+### Troubleshooting
 
 | Message | Cause |
 |---|---|
@@ -161,3 +186,99 @@ A trimmed report for a CLI run (values are from a test system):
 | `Not available: ... read from stdin` | The pre-run section needs files or a directory, not piped input. |
 | `Not available: ... agent line "Downloading Terraform configuration" ... not in the logs` | `task-worker.log` is missing or does not cover the run. |
 | `warning: '...' does not look like a run ID` | The first argument should look like `run-` followed by 16 characters. |
+
+## run_summary.sh
+
+Summary of **all** runs in a set of TFE logs: how many runs there are, how many (and what percentage) ended in each status, a split per workflow and, with `--full`, one row per run. Use `run_timing.sh <run-id>` for the details of a single run.
+
+```bash
+./run_summary.sh /path/to/terraform-enterprise > run_summary.md          # summary only
+./run_summary.sh --full /path/to/terraform-enterprise > run_summary.md   # everything
+cat *.log | ./run_summary.sh > run_summary.md                            # piped input also works
+```
+
+| Option | Meaning |
+|---|---|
+| (default) | Summary only: the number of runs, the runs and percentage per status, and the split per workflow. The size does not depend on the number of runs: 10,000 runs give the same 30 lines. |
+| `--full` | Everything: also one row per run, the run IDs without a status, the runs that need attention (errored first, then waiting or running) and other observations. With thousands of runs this is a long report. |
+| `-h`, `--help` | Show the usage text. |
+
+Options can stand anywhere on the command line. With no argument and a terminal on stdin, the current directory is searched. Directories are searched in all subdirectories, so a whole support bundle can be given as is. It stops with an error when no run ID is found in the input.
+
+It needs the audit log, so pass at least `atlas.log`, `sidekiq.log` and `sidekiq-critical.log`. `task-worker.log` adds the workspace name and the killed-agent evidence, and `nginx.log` adds the workspace of runs that never started.
+
+### What the summary report contains
+
+| Section | Default | `--full` | Content |
+|---|---|---|---|
+| Header | yes | yes | Files read, number of lines, first and last time in the logs. |
+| Summary | yes | yes | Number of runs, and runs and percentage per status. |
+| By workflow | yes | yes | One row per workflow (CLI, API-driven, VCS, UI), one column per status that occurs, and a total row that matches the status table. |
+| Runs | no | yes | One row per run: workflow, workspace, status, first and last event, duration and evidence. |
+| Run IDs without a status | no | yes | Run IDs that were only read or viewed. Not counted. |
+| Runs that need attention | no | yes | Errored runs first, then queued, pending, planned, planning and applying runs, with the evidence. |
+| Other observations | no | yes | Configuration versions that errored before a run existed. |
+
+Example of the default report (values are from a test system, see [`example_reports/summary.md`](example_reports/summary.md); the same logs with `--full` are in [`example_reports/summary_full.md`](example_reports/summary_full.md)):
+
+```
+## Summary
+
+- **Runs with a lifecycle in the logs:** 14
+
+| Status | Runs | % |
+|---|---|---|
+| applied | 3 | 21.4% |
+| errored | 1 | 7.1% |
+| plan only (speculative) | 7 | 50.0% |
+| planned (waiting for confirmation) | 1 | 7.1% |
+| planning (running) | 1 | 7.1% |
+| pending (waiting for a previous run or its approval) | 1 | 7.1% |
+| **Total** | **14** | **100%** |
+
+## By workflow
+
+| Workflow | Runs | % | applied | errored | plan only | planned | planning | pending |
+|---|---|---|---|---|---|---|---|---|
+| CLI | 9 | 64.3% | 1 | 1 | 6 | 0 | 1 | 0 |
+| API-driven | 1 | 7.1% | 1 | 0 | 0 | 0 | 0 | 0 |
+| VCS | 4 | 28.6% | 1 | 0 | 1 | 1 | 0 | 1 |
+| **Total** | **14** | **100%** | **3** | **1** | **7** | **1** | **1** | **1** |
+```
+
+With `--full`, the row of the errored run shows why it is errored, and the row of the planned run shows that it blocks the pending one:
+
+```
+| `run-fSmjR4Ge3PnNB3dd` | CLI | test | errored | 10:22:44 | 10:29:00 | 6m 16s | agent interrupted at 10:23:00 (task-worker), run errored at 10:29:00, 6m 00s later |
+| `run-8nnNBdkDr7Kg9onE` | VCS | null_resource | planned (waiting for confirmation) | 10:09:36 | 10:09:43 | - | ...; waiting for a confirm or discard; blocks the pending run `run-UCp6LZHrGY6Qco4D` |
+```
+
+### How the status is found
+
+The status comes from the run audit events in `atlas.log`, `sidekiq.log` and `sidekiq-critical.log`. Pass all three, because each holds part of the events. Events can share the same second, so the status is taken from which events exist, first match wins:
+
+| Events seen for the run | Status |
+|---|---|
+| `applied` | applied |
+| `errored` | errored |
+| `canceled` | canceled |
+| `discarded` | discarded |
+| `finished` | plan only (speculative): the plan is done and nothing is left to apply |
+| `applying`, `confirmed` or `apply` | applying (running) |
+| `planned` | planned (waiting for confirmation) |
+| `planning` | planning (running) |
+| only `queue` / `create` | queued (waiting for an agent) |
+| webhook configuration version uploaded, no run queued after it | pending (waiting for a previous run or its approval) |
+
+Only runs that were created count, that is runs with a `create` or `queue` audit event, plus the pending VCS case described next. Run IDs without such an event are listed apart (with `--full`) and are not counted. They are runs from before the logs start, or runs that were only viewed in the UI or polled by a client. Page views and polling are never used to decide that a run exists.
+
+**Pending VCS run without a queue event.** When a run waits behind another run in the same workspace (for example one that is `planned` and waits for a confirm), TFE does not write a `queue` event. The creation is still visible: a webhook user (`gh-webhooks-...`) creates a configuration version and it is uploaded, and normally a run is queued in the same second. If no run is queued within about 10 seconds after the upload, the configuration version is reported as one pending VCS run. The run ID is attached only as a label, taken from the first page request for an otherwise unknown run ID after the upload; if there is none the report says the run ID is not in the logs. The workspace is blocked by the latest unfinished run (`planned`, `planning`, `applying`) of the same workspace, and that run's row says it blocks the pending run.
+
+The "By workflow" table has one column per status that occurs, with a total row that matches the status table. The workflow comes from the user agent of the `POST /api/v2/runs` request (`go-tfe` = CLI, browser = UI). Runs without a create event are VCS when a webhook user changed their state, otherwise API-driven.
+
+### Limits
+
+- A run that is `planning` with no later event may be running or stuck. The report shows the age of the last event against the last line in the logs; judge with that.
+- **Pending runs are only found for VCS.** A pending run from the CLI or an API client with no `create` or `queue` event leaves no trace except page views, so it is not counted. A pending VCS run is found only when its webhook configuration version and the upload are in the logs, and its workspace name and blocking run only when the UI page of the run was opened.
+- An `errored` run caused by a killed agent shows the time between the agent's `Received interrupt, shutting down` and the `errored` event.
+- Configuration versions that errored before a run existed (for example a VCS authentication failure) are not runs. They are listed under "Other observations".

@@ -1,6 +1,6 @@
 # TFE run tools
 
-Two bash scripts that turn Terraform Enterprise (TFE) log files into markdown reports.
+Two scripts that turn Terraform Enterprise (TFE) log files into markdown reports. Each script exists as a bash version (`.sh`) and a Python version (`.py`) that give the same report.
 
 ## Contents
 
@@ -17,20 +17,21 @@ Two bash scripts that turn Terraform Enterprise (TFE) log files into markdown re
   - [What the summary report contains](#what-the-summary-report-contains)
   - [How the status is found](#how-the-status-is-found)
   - [Limits](#limits)
+- [Python versions](#python-versions): `run_timing.py` and `run_summary.py`
 
 | Script | Question it answers | Output |
 |---|---|---|
-| [`run_summary.sh`](#run_summarysh) | How many runs are there, and how did they end? | Number of runs, percentage per status, split per workflow. `--full` adds one row per run. |
+| [`run_summary.sh`](#run_summarysh) | How many runs are there, and how did they end? | Number of runs, percentage per status, split per workflow. `--full` adds one row per run, `--errors` only the runs with an error. |
 | [`run_timing.sh`](#run_timingsh) | Why did this one run take so long? | Timing report for one run: state changes, agent steps, API calls, steps before the run existed. |
 
 Typical use: run `run_summary.sh` on a support bundle first to see all runs and the ones that need attention (errored, waiting, running), then run `run_timing.sh <run-id>` on a run from that list.
 
 Both scripts:
 
-- are one bash script with no dependencies besides standard tools: `bash`, `grep`, `sed`, `awk`, `sort`;
+- are one script each, with no dependencies besides standard tools (`bash`, `grep`, `sed`, `awk`, `sort`) or, for the Python versions, Python 3 and its standard library;
 - are read-only: they never change the logs and remove their temporary files on exit;
 - read the same log files: a directory (searched in all its subdirectories), single files, or piped lines;
-- skip `*.md` and `*.sh` files, so reports and scripts can sit in the same directory;
+- skip `*.md`, `*.sh` and `*.py` files, so reports and scripts can sit in the same directory;
 - remove exact duplicate lines;
 - write the report to stdout and errors to stderr. All times are UTC, as written in the logs.
 
@@ -40,6 +41,7 @@ Example reports for both scripts are in [`example_reports/`](example_reports/).
 |---|---|
 | [`summary.md`](example_reports/summary.md) | `./run_summary.sh host` |
 | [`summary_full.md`](example_reports/summary_full.md) | `./run_summary.sh --full host` |
+| [`summary_errors.md`](example_reports/summary_errors.md) | `./run_summary.sh --errors host` |
 | [`cli-driven.md`](example_reports/cli-driven.md), [`api-driven.md`](example_reports/api-driven.md), [`vcs-driven.md`](example_reports/vcs-driven.md) | `./run_timing.sh <run-id> host` |
 
 ## run_timing.sh
@@ -210,6 +212,7 @@ Summary of **all** runs in a set of TFE logs: how many runs there are, how many 
 ```bash
 ./run_summary.sh /path/to/terraform-enterprise > run_summary.md          # summary only
 ./run_summary.sh --full /path/to/terraform-enterprise > run_summary.md   # everything
+./run_summary.sh --errors /path/to/terraform-enterprise > run_summary.md  # like --full, only runs with an error in the details
 cat *.log | ./run_summary.sh > run_summary.md                            # piped input also works
 ```
 
@@ -217,23 +220,24 @@ cat *.log | ./run_summary.sh > run_summary.md                            # piped
 |---|---|
 | (default) | Summary only: the number of runs, the runs and percentage per status, and the split per workflow. The size does not depend on the number of runs: 10,000 runs give the same 30 lines. |
 | `--full` | Everything: also one row per run, the run IDs without a status, the runs that need attention (errored first, then waiting or running) and other observations. With thousands of runs this is a long report. |
+| `--errors` | Like `--full`, but the run table and the list of runs that need attention only have the runs that ended in an error (errored, canceled, discarded). Planned, applying, planning, queued and pending runs count as alright and are left out. The counts in the summary and the workflow table still cover all runs. |
 | `-h`, `--help` | Show the usage text. |
 
 Options can stand anywhere on the command line. With no argument and a terminal on stdin, the current directory is searched. Directories are searched in all subdirectories, so a whole support bundle can be given as is. It stops with an error when no run ID is found in the input.
 
-It needs the audit log, so pass at least `atlas.log`, `sidekiq.log` and `sidekiq-critical.log`. `task-worker.log` adds the workspace name and the killed-agent evidence, and `nginx.log` adds the workspace of runs that never started.
+It needs the audit log, so pass at least `atlas.log`, `sidekiq.log` and `sidekiq-critical.log`. `task-worker.log` adds the workspace name and the killed-agent evidence, and `nginx.log` adds the workspace of runs that never started. The organization name and ID come from the run audit events. The workspace ID comes from API and page requests that name both the run and the workspace; when a run has no such line, the ID of another run with the same workspace name is used. A name or ID that is not in the logs is shown as `-`.
 
 ### What the summary report contains
 
-| Section | Default | `--full` | Content |
-|---|---|---|---|
-| Header | yes | yes | Files read, number of lines, first and last time in the logs. |
-| Summary | yes | yes | Number of runs, and runs and percentage per status. |
-| By workflow | yes | yes | One row per workflow (CLI, API-driven, VCS, UI), one column per status that occurs, and a total row that matches the status table. |
-| Runs | no | yes | One row per run: workflow, workspace, status, first and last event, duration and evidence. |
-| Run IDs without a status | no | yes | Run IDs that were only read or viewed. Not counted. |
-| Runs that need attention | no | yes | Errored runs first, then queued, pending, planned, planning and applying runs, with the evidence. |
-| Other observations | no | yes | Configuration versions that errored before a run existed. |
+| Section | Default | `--full` | `--errors` | Content |
+|---|---|---|---|---|
+| Header | yes | yes | yes | Files read, number of lines, first and last time in the logs. |
+| Summary | yes | yes | yes | Number of runs, and runs and percentage per status. |
+| By workflow | yes | yes | yes | One row per workflow (CLI, API-driven, VCS, UI), one column per status that occurs, and a total row that matches the status table. |
+| Runs | no | yes | only errored, canceled, discarded | One row per run: workflow, organization (name and ID), workspace (name and ID), status, first and last event, duration and evidence. |
+| Run IDs without a status | no | yes | no | Run IDs that were only read or viewed. Not counted. |
+| Runs that need attention | no | yes | only errored, canceled, discarded | Errored runs first, then queued, pending, planned, planning and applying runs, with the evidence. |
+| Other observations | no | yes | yes | Configuration versions that errored before a run existed. |
 
 Example of the default report (values are from a test system, see [`example_reports/summary.md`](example_reports/summary.md); the same logs with `--full` are in [`example_reports/summary_full.md`](example_reports/summary_full.md)):
 
@@ -298,3 +302,32 @@ The "By workflow" table has one column per status that occurs, with a total row 
 - **Pending runs are only found for VCS.** A pending run from the CLI or an API client with no `create` or `queue` event leaves no trace except page views, so it is not counted. A pending VCS run is found only when its webhook configuration version and the upload are in the logs, and its workspace name and blocking run only when the UI page of the run was opened.
 - An `errored` run caused by a killed agent shows the time between the agent's `Received interrupt, shutting down` and the `errored` event.
 - Configuration versions that errored before a run existed (for example a VCS authentication failure) are not runs. They are listed under "Other observations".
+
+## Python versions
+
+`run_timing.py` and `run_summary.py` are ports of the two bash scripts. They take the same options and arguments, read the same input (directory, files or piped lines) and write the same report to stdout. The reports are identical byte for byte; the only difference is the script name in the `--help` text.
+
+```bash
+./run_summary.py --full /path/to/terraform-enterprise > run_summary.md
+./run_timing.py run-XXXXXXXXXXXXXXXX /path/to/terraform-enterprise > report.md
+```
+
+- They need Python 3 (tested with 3.14) and nothing else: only the standard library is used, so there is nothing to install. No `grep`, `sed`, `awk` or `sort` is needed, which also makes them usable where those tools differ (BSD and GNU) or are missing.
+- They are read-only and write no temporary files.
+- They read the logs as bytes (Latin-1), so logs with non-UTF-8 bytes work, and the output has the same bytes as the input.
+- They are faster on large logs: about 0.07 s against 0.46 s for the `host/` sample.
+- The usage text of every script is at the top of the file: `./run_summary.py --help`.
+
+Both versions are kept in step. To check that, run both on the same logs and compare:
+
+```bash
+for m in "" --full --errors; do ./run_summary.sh $m logs | cmp - <(./run_summary.py $m logs) && echo "same $m"; done
+./run_timing.sh run-XXXXXXXXXXXXXXXX logs | cmp - <(./run_timing.py run-XXXXXXXXXXXXXXXX logs) && echo same
+```
+
+### Two fixes made to the bash scripts while porting
+
+Output of the bash scripts depended on things that are not defined, and a port can only match a result that is defined. Both fixes are small and also apply to `run_timing.sh`:
+
+- **Sort order.** `run_timing.sh` now sets `LC_ALL=C` (as `run_summary.sh` already did). Before, events with the same timestamp could come out in a different order on a system with another locale (for example two agent lines in the same millisecond).
+- **"Before the run was created" lists.** The "cut at the previous run create" run and the order of the "other runs created with this token" warning came from the order in which awk walks an array, which is not defined. They are now taken in log order and listed by time. The "cut at" run is now the latest earlier run (the one that really sets the start of the window); before, the first run in the list was shown, which was not always that run. The list of "other webhooks" of a VCS run is also ordered by time. This changes the label and the order of that warning line in some reports, not the table with the calls.

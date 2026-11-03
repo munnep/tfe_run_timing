@@ -3,14 +3,19 @@
 # run_summary.sh - summary (markdown) of all Terraform Enterprise runs in a set of log files
 #
 # Usage:
-#   ./run_summary.sh [--full] [file-or-dir ...]   > run_summary.md
-#   grep -h run- * | ./run_summary.sh [--full]    > run_summary.md
+#   ./run_summary.sh [--full | --errors] [file-or-dir ...]   > run_summary.md
+#   grep -h run- * | ./run_summary.sh [--full | --errors]    > run_summary.md
 #
 #   (default)  Only the summary: number of runs, runs and percentage per status, and
 #              the split per workflow. The size does not depend on the number of runs.
 #   --full     Everything: also one row per run, the run IDs without a status, the runs
 #              that need attention (errored, waiting, running) and other observations.
 #              With thousands of runs this is a long report.
+#   --errors   Like --full, but the run table and the "runs that need attention" list only
+#              have the runs that ended in an error (errored, canceled, discarded). Planned,
+#              applying, planning, queued and pending runs count as alright. The counts
+#              in the summary still cover all runs. The run IDs without a status are
+#              only in --full.
 #   -h, --help Show this text.
 #
 # Input can be raw log files or directories (searched recursively), or pre-grepped
@@ -18,7 +23,8 @@
 # is searched. Output goes to stdout; times are UTC as found in the logs.
 #
 # The report shows how many runs there are, how many (and what percentage) ended in
-# each status, a split per workflow (CLI / API-driven / VCS / UI) and, with --full, one row per run.
+# each status, a split per workflow (CLI / API-driven / VCS / UI) and, with --full, one row per run
+# (with organization name and ID, workspace name and ID).
 # Use run_timing.sh <run-id> for the timing details of a single run.
 #
 # How the status is found:
@@ -44,10 +50,12 @@ usage() {
 }
 
 FULL=0
+ERRORS=0
 ARGS=()
 while [ $# -gt 0 ]; do          # options may stand anywhere on the command line
   case $1 in
     --full) FULL=1 ;;
+    --errors) FULL=1; ERRORS=1 ;;
     -h|--help) usage 0 ;;
     --) shift; ARGS+=("$@"); break ;;
     -?*) echo "error: unknown option '$1' (try --help)" >&2; exit 1 ;;
@@ -77,7 +85,7 @@ if [ $# -eq 0 ]; then
     set -- .
   fi
 fi
-grep -raEh --exclude='*.md' --exclude='*.sh' -e "$PAT" -- "$@" 2>/dev/null | sort -u > "$TMP/raw"
+grep -raEh --exclude='*.md' --exclude='*.sh' --exclude='*.py' -e "$PAT" -- "$@" 2>/dev/null | sort -u > "$TMP/raw"
 
 if ! grep -aqE 'run-[A-Za-z0-9]{16}' "$TMP/raw"; then
   echo "error: no run IDs (run-XXXXXXXXXXXXXXXX) were found in the input" >&2
@@ -152,9 +160,9 @@ AWK
 if [ "$STDIN_MODE" -eq 1 ]; then
   NFILES="input from stdin"
 else
-  NFILES="$(find "$@" -type f ! -name '*.md' ! -name '*.sh' 2>/dev/null | wc -l | tr -d ' ') file(s)"
+  NFILES="$(find "$@" -type f ! -name '*.md' ! -name '*.sh' ! -name '*.py' 2>/dev/null | wc -l | tr -d ' ') file(s)"
 fi
-grep -raEh --exclude='*.md' --exclude='*.sh' -e '^' -- "$@" 2>/dev/null \
+grep -raEh --exclude='*.md' --exclude='*.sh' --exclude='*.py' -e '^' -- "$@" 2>/dev/null \
   | awk -f "$TMP/lib.awk" -f "$TMP/span.awk" > "$TMP/span"
 IFS="$TAB" read -r SPAN_FIRST SPAN_LAST SPAN_LINES < "$TMP/span"
 : "${SPAN_FIRST:=}"; : "${SPAN_LAST:=}"; : "${SPAN_LINES:=0}"
@@ -175,14 +183,26 @@ function shown(str) {
   line = $0
 
   # ---- every run ID on the line (run- + 16 characters; "run-events" etc. are shorter)
-  s = line
+  s = line; firstrid = ""; nvr = 0
   while (match(s, /run-[A-Za-z0-9]+/)) {
     id = substr(s, RSTART, RLENGTH)
     if (length(id) == 20) {
       if (!(id in seen)) { seen[id] = 1; order[++nid] = id }
       cnt[id]++
+      if (firstrid == "") { firstrid = id; nvr = 1 } else if (id != firstrid) nvr = 2
     }
     s = substr(s, RSTART + RLENGTH)
+  }
+
+  # ---- workspace ID (ws- + 16 characters): only from a line with one run ID and one workspace ID
+  if (nvr == 1 && index(line, "ws-") && !(firstrid in wsi)) {
+    s = line; wid = ""; nws = 0
+    while (match(s, /ws-[A-Za-z0-9]+/)) {
+      x = substr(s, RSTART, RLENGTH)
+      if (length(x) == 19) { if (wid == "") wid = x; else if (x != wid) nws = 2 }
+      s = substr(s, RSTART + RLENGTH)
+    }
+    if (wid != "" && nws == 0) wsi[firstrid] = wid
   }
 
   # ---- audit log (atlas / sidekiq / sidekiq-critical)
@@ -197,6 +217,7 @@ function shown(str) {
       if (!(rid in fe) || e < fe[rid]) { fe[rid] = e; fs[rid] = str }
       if (!(rid in le) || e > le[rid]) { le[rid] = e; ls[rid] = str }
       actors[rid] = actors[rid] "|" sval(line, "actor")
+      if (!(rid in orgn) && sval(line, "organization") != "") { orgn[rid] = sval(line, "organization"); orgi[rid] = sval(line, "organization_id") }
       if (act == "create") {
         u = grab(line, "\\[[0-9a-f-]+\\] \\[Audit Log\\]")
         sub(/\] \[Audit Log\]$/, "", u); sub(/^\[/, "", u)
@@ -208,7 +229,7 @@ function shown(str) {
       if (!(rid in cvhook)) { cvhook[rid] = 1; nch++; chlist[nch] = rid }
     } else if (res == "configuration_version" && act == "uploaded") {
       e = ep(str)
-      if (!(rid in upl) || e < upl[rid]) { upl[rid] = e; uplstr[rid] = str }
+      if (!(rid in upl) || e < upl[rid]) { upl[rid] = e; uplstr[rid] = str; cvorgn[rid] = sval(line, "organization"); cvorgi[rid] = sval(line, "organization_id") }
     }
     next
   }
@@ -270,10 +291,29 @@ function statuscode(id) {
   return 9
 }
 function shortst(c) { return (c == 6) ? "planned" : (c == 7) ? "applying" : (c == 8) ? "planning" : "queued" }
-function wsof(id) { return (id in wsn) ? wsn[id] : ((id in wsr) ? wsr[id] : "") }
+function wsof(id) {
+  if (id in wsn) return wsn[id]
+  if (id in wsr) return wsr[id]
+  if ((id in wsi) && (wsi[id] in i2n)) return i2n[wsi[id]]
+  return ""
+}
+# workspace ID of a run: from its own lines, else from another run with the same workspace name
+function wsidof(id,   nm) {
+  if (id in wsi) return wsi[id]
+  nm = wsof(id)
+  if (nm != "" && (nm in n2i)) return n2i[nm]
+  return ""
+}
+function dash(x) { return (x == "") ? "-" : x }
 
 END {
   lastlog = (SPAN_LAST != "") ? ep(SPAN_LAST) : 0
+  # workspace name <-> ID pairs known from runs that have both (names are unique in an organization)
+  for (i = 1; i <= nid; i++) {
+    id = order[i]
+    nm = (id in wsn) ? wsn[id] : ((id in wsr) ? wsr[id] : "")
+    if (nm != "" && (id in wsi)) { n2i[nm] = wsi[id]; i2n[wsi[id]] = nm }
+  }
   split("applied|errored|canceled|discarded|plan only (speculative)|planned (waiting for confirmation)|applying (running)|planning (running)|queued (waiting for an agent)|pending (waiting for a previous run or its approval)", lab, "|")
 
   # ---- pending runs that never got a queue event: a VCS configuration version (created by
@@ -336,8 +376,8 @@ END {
       }
       if (id in blocks) note = note (note != "" ? "; " : "") "blocks the pending run" blocks[id]
       dur = (code <= 5) ? fmt(le[id] - fe[id]) : "-"
-      printf "%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n", fe[id], id, wf, (wsof(id) != "" ? wsof(id) : "-"), code, shown(fs[id]), shown(ls[id]), dur, note > RUNS
-      if (code == 2 || (code >= 6 && code <= 10)) printf "%d\t- `%s` is %s: %s\n", (code == 2 ? 1 : 2), id, lab[code], note > OBS
+      printf "%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", fe[id], id, wf, (wsof(id) != "" ? wsof(id) : "-"), code, shown(fs[id]), shown(ls[id]), dur, note, dash(wsidof(id)), dash(orgn[id]), dash(orgi[id]) > RUNS
+      if (code >= 2 && code <= 4 || (code >= 6 && code <= 10)) printf "%d\t- `%s` is %s: %s\n", (code <= 4 ? 1 : 2), id, lab[code], note > OBS
     } else if (!(id in claimed)) {
       printf "%s\t%d\t%d\n", id, cnt[id], pc[id] + 0 > HIST
     }
@@ -347,7 +387,7 @@ END {
     cv = orcv[j]
     note = sprintf("configuration version `%s` uploaded at %s by a webhook, but no run was queued after it", cv, clk(upl[cv]))
     if (oblk[j] != "") note = note sprintf("; the workspace is blocked by `%s` (%s)", oblk[j], shortst(statuscode(oblk[j])))
-    printf "%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n", upl[cv], orid[j], "VCS", (ows[j] != "" ? ows[j] : "-"), 10, shown(uplstr[cv]), shown(uplstr[cv]), "-", note > RUNS
+    printf "%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", upl[cv], orid[j], "VCS", (ows[j] != "" ? ows[j] : "-"), 10, shown(uplstr[cv]), shown(uplstr[cv]), "-", note, ((ows[j] in n2i) ? n2i[ows[j]] : "-"), dash(cvorgn[cv]), dash(cvorgi[cv]) > RUNS
     printf "%d\t- `%s` is %s: %s\n", 2, orid[j], lab[10], note > OBS
   }
 
@@ -358,17 +398,28 @@ END {
 }
 AWK
 
-: > "$TMP/runs.tsv"; : > "$TMP/hist.tsv"; : > "$TMP/obs.md"; : > "$TMP/cvobs.md"
+: > "$TMP/runs.tsv"; : > "$TMP/hist.tsv"; : > "$TMP/obs.md"; : > "$TMP/cvobs.md"; : > "$TMP/obs.err"
 awk -v RUNS="$TMP/runs.tsv" -v HIST="$TMP/hist.tsv" -v OBS="$TMP/obs.md" -v CVOBS="$TMP/cvobs.md" \
     -v SPAN_FIRST="$SPAN_FIRST" -v SPAN_LAST="$SPAN_LAST" \
     -f "$TMP/lib.awk" -f "$TMP/extract.awk" "$TMP/raw"
 sort -t "$TAB" -s -k1,1n "$TMP/runs.tsv" > "$TMP/runs.sorted"
 # errored runs first in the "needs attention" list, so a cap never hides them
-sort -t "$TAB" -s -k1,1n "$TMP/obs.md" | cut -f2- > "$TMP/obs.sorted" && mv "$TMP/obs.sorted" "$TMP/obs.md"
+sort -t "$TAB" -s -k1,1n "$TMP/obs.md" > "$TMP/obs.keyed"
+awk -F "$TAB" '$1 == 1' "$TMP/obs.keyed" | cut -f2- > "$TMP/obs.err"     # --errors: only errors
+cut -f2- "$TMP/obs.keyed" > "$TMP/obs.md"
 
 # ---------------------------------------------------------------- report
 cat > "$TMP/report.awk" <<'AWK'
 function esc(s) { gsub(/\|/, "\\\\|", s); return s }
+# "name (`id`)", or only the part that is known
+function cell(nm, ident) {
+  if (nm == "-" && ident == "-") return "-"
+  if (ident == "-") return nm
+  if (nm == "-") return "`" ident "`"
+  return nm " (`" ident "`)"
+}
+function orgcell(i) { return cell(on[i], oi[i]) }
+function wscell(i) { return cell(ws[i], wid[i]) }
 function pct(n, t) { return (t > 0) ? sprintf("%.1f%%", n * 100 / t) : "-" }
 
 BEGIN {
@@ -380,7 +431,7 @@ BEGIN {
   split("applied|errored|canceled|discarded|plan only|planned|applying|planning|queued|pending", shl, "|")
 }
 {
-  n++; id[n] = $2; wf[n] = $3; ws[n] = $4; code[n] = $5; cr[n] = $6; la[n] = $7; du[n] = $8; nt[n] = $9
+  n++; id[n] = $2; wf[n] = $3; ws[n] = $4; code[n] = $5; cr[n] = $6; la[n] = $7; du[n] = $8; nt[n] = $9; wid[n] = $10; on[n] = $11; oi[n] = $12
   cc[$5]++; wc[$3]++
   wcs[$3, sh[$5]]++; scs[sh[$5]]++
 }
@@ -427,15 +478,31 @@ END {
     print "Each column is a run status. The workflow is how the run was started: `CLI` = terraform CLI, `VCS` = push or pull request on the connected repository, `API-driven` = an API client uploaded the configuration and TFE created the run, `UI` = started in the web UI."
     print ""
 
-    if (FULL) {
+    if (FULL && ERRORS) {
+      shown = 0
+      for (i = 1; i <= n; i++) if (code[i] >= 2 && code[i] <= 4) shown++
+      print "## Runs with an error"
+      print ""
+      printf "Showing %d of %d runs (errored, canceled or discarded). Left out: runs that are applied, plan only, or still in progress (planned, applying, planning, queued, pending). Sorted by the first event. All times UTC. Audit events have whole-second times. For the details of one run use `run_timing.sh <run-id>`.\n", shown, total
+      print ""
+      if (shown == 0) {
+        printf "- None. None of the %d runs errored, was canceled or discarded.\n", total
+      } else {
+        print "| Run | Workflow | Organization | Workspace | Status | First event | Last event | Duration | Evidence |"
+        print "|---|---|---|---|---|---|---|---|---|"
+        for (i = 1; i <= n; i++) if (code[i] >= 2 && code[i] <= 4)
+          printf "| `%s` | %s | %s | %s | %s | %s | %s | %s | %s |\n", id[i], wf[i], orgcell(i), wscell(i), lab[code[i]], cr[i], la[i], du[i], esc(nt[i])
+      }
+      print ""
+    } else if (FULL) {
       print "## Runs"
       print ""
       print "Sorted by the first event. All times UTC. Audit events have whole-second times. For the details of one run use `run_timing.sh <run-id>`."
       print ""
-      print "| Run | Workflow | Workspace | Status | First event | Last event | Duration | Evidence |"
-      print "|---|---|---|---|---|---|---|---|"
+      print "| Run | Workflow | Organization | Workspace | Status | First event | Last event | Duration | Evidence |"
+      print "|---|---|---|---|---|---|---|---|---|"
       for (i = 1; i <= n; i++)
-        printf "| `%s` | %s | %s | %s | %s | %s | %s | %s |\n", id[i], wf[i], ws[i], lab[code[i]], cr[i], la[i], du[i], esc(nt[i])
+        printf "| `%s` | %s | %s | %s | %s | %s | %s | %s | %s |\n", id[i], wf[i], orgcell(i), wscell(i), lab[code[i]], cr[i], la[i], du[i], esc(nt[i])
       print ""
     }
   } else {
@@ -443,7 +510,7 @@ END {
     print ""
   }
 
-  if (nh > 0 && FULL) {
+  if (nh > 0 && FULL && !ERRORS) {
     print "## Run IDs without a status"
     print ""
     print "These IDs have no create or queue event in the logs, so they are not counted as runs. They are runs from before the logs start, or runs that were only viewed or polled."
@@ -457,10 +524,12 @@ END {
   if (FULL) {
     print "## Runs that need attention"
     print ""
-    print "Errored, canceled or discarded runs, and runs that are still waiting or running. Errored runs come first."
+    if (ERRORS) print "Errored, canceled or discarded runs."
+    else print "Errored, canceled or discarded runs, and runs that are still waiting or running. Errored runs come first."
     print ""
     nobs = 0
-    while ((getline l < OBS) > 0) { print l; nobs++ }
+    obsfile = ERRORS ? OBSERR : OBS
+    while ((getline l < obsfile) > 0) { print l; nobs++ }
     if (nobs == 0) print "- None."
     print ""
     print "## Other observations"
@@ -480,7 +549,7 @@ END {
 AWK
 
 awk -v HIST="$TMP/hist.tsv" -v OBS="$TMP/obs.md" -v CVOBS="$TMP/cvobs.md" -v NFILES="$NFILES" \
-    -v FULL="$FULL" \
+    -v FULL="$FULL" -v ERRORS="$ERRORS" -v OBSERR="$TMP/obs.err" \
     -v SPAN_FIRST="$SPAN_FIRST" -v SPAN_LAST="$SPAN_LAST" -v SPAN_LINES="$SPAN_LINES" \
     -v LINES="$(wc -l < "$TMP/raw" | tr -d ' ')" \
     -f "$TMP/lib.awk" -f "$TMP/report.awk" "$TMP/runs.sorted"

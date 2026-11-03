@@ -42,6 +42,8 @@
 #
 set -u
 
+export LC_ALL=C      # same sort order everywhere; logs can contain non-UTF-8 bytes
+
 usage() {
   awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
   exit "${1:-0}"
@@ -82,11 +84,11 @@ TAB=$(printf '\t')
 # a plain `grep` adds, and drop exact duplicate lines.
 collect() {
   if [ $# -gt 0 ]; then
-    grep -raF --exclude='*.md' --exclude='*.sh' -r -- "$RUN_ID" "$@" 2>/dev/null
+    grep -raF --exclude='*.md' --exclude='*.sh' --exclude='*.py' -r -- "$RUN_ID" "$@" 2>/dev/null
   elif [ ! -t 0 ]; then
     grep -aF -- "$RUN_ID"
   else
-    grep -raF --exclude='*.md' --exclude='*.sh' -r -- "$RUN_ID" . 2>/dev/null
+    grep -raF --exclude='*.md' --exclude='*.sh' --exclude='*.py' -r -- "$RUN_ID" . 2>/dev/null
   fi
 }
 
@@ -344,13 +346,13 @@ function hms(e,   s, h, m) {
   }
 }
 
-# another run (CLI flow) or configuration version (API flow) made with the same token in the window
-function other(u, id,   i) {
-  if (u == UUID || !(u in idx)) return
-  i = idx[u]
+# another run (CLI flow) or configuration version (API flow) made with the same token in the window.
+# Called in file order, so the result does not depend on the order awk walks an array.
+function other(i, id) {
+  if (ruid[i] == UUID) return
   if (tok[i] != TOKEN || rep[i] > ET || rep[i] < lo) return
   np++; prid[np] = id; prep[np] = rep[i]; prt[np] = rt[i]; prevrow[i] = 1
-  if (rep[i] <= CE && rep[i] > cut) cut = rep[i]
+  if (rep[i] <= CE && rep[i] > cut) { cut = rep[i]; cutid = id; cutt = rt[i] }
 }
 
 END {
@@ -364,8 +366,15 @@ END {
   ETS = (ET == CE) ? rt[c] : substr(hms(ET), 1, 8)
 
   cut = 0
-  if (api) { for (u in cvc) other(u, cvc[u]) }
-  else     { for (u in runc) other(u, runc[u]) }
+  for (q = 1; q <= n; q++) {
+    if (api && (ruid[q] in cvc)) other(q, cvc[ruid[q]])
+    else if (!api && (ruid[q] in runc)) other(q, runc[ruid[q]])
+  }
+  for (j = 2; j <= np; j++) {            # list the other runs by time (stable)
+    v1 = prid[j]; v2 = prep[j]; v3 = prt[j]
+    for (k = j - 1; k >= 1 && prep[k] > v2; k--) { prid[k + 1] = prid[k]; prep[k + 1] = prep[k]; prt[k + 1] = prt[k] }
+    prid[k + 1] = v1; prep[k + 1] = v2; prt[k + 1] = v3
+  }
   start = (cut > lo) ? cut : lo
 
   # last configuration version created by this token before the run create
@@ -434,7 +443,7 @@ END {
     printf "API-driven workflow: there is no run-create request. The client created and uploaded a configuration version and TFE then created and queued the run itself. " > OUT
     printf "Calls by `%s` (token `%s`, IP `%s`, user agent `%s`; the user agent is not used for matching) up to the moment TFE queued the run. ", ACTOR, TOKEN, IP, uas[c] > OUT
   } else printf "Calls by `%s` (token `%s`, IP `%s`) up to the run-create request `%s`. ", ACTOR, TOKEN, IP, UUID > OUT
-  if (cut > lo) printf "Window: %d min, cut at the previous %s `%s` (%s) by the same token. ", WIN, (api ? "configuration version" : "run create"), prid[1], prt[1] > OUT
+  if (cut > lo) printf "Window: %d min, cut at the previous %s `%s` (%s) by the same token. ", WIN, (api ? "configuration version" : "run create"), cutid, cutt > OUT
   else printf "Window: last %d min. ", WIN > OUT
   print "Atlas logs whole seconds, so gaps are +/- 1s." > OUT
   print "" > OUT
@@ -560,6 +569,11 @@ END {
   for (i = 1; i <= nw; i++) if (we[i] <= cve && we[i] >= cve - 5 && (!bw || we[i] > we[bw])) bw = i
   lo = (qe ? qe : cve) - WIN * 60
   for (i = 1; i <= nw; i++) if (i != bw && we[i] >= lo && we[i] <= (qe ? qe : cve)) { no++; oe[no] = we[i]; oev[no] = wev[i] }
+  for (j = 2; j <= no; j++) {            # list them by time, then by event name (file order differs between systems)
+    v1 = oe[j]; v2 = oev[j]
+    for (k = j - 1; k >= 1 && (oe[k] > v1 || (oe[k] == v1 && oev[k] > v2)); k--) { oe[k + 1] = oe[k]; oev[k + 1] = oev[k] }
+    oe[k + 1] = v1; oev[k + 1] = v2
+  }
 
   if (bw) {
     r = wr[bw]
@@ -609,7 +623,7 @@ if [ $# -eq 0 ] && [ ! -t 0 ]; then
   SKIP_REASON="the input was read from stdin; run the script on the raw log files or directory to get this section"
 else
   [ $# -gt 0 ] || set -- .
-  GREP_SRC() { grep -raFh --exclude='*.md' --exclude='*.sh' -r "$@" 2>/dev/null; }
+  GREP_SRC() { grep -raFh --exclude='*.md' --exclude='*.sh' --exclude='*.py' -r "$@" 2>/dev/null; }
   RE_UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
   UUID=$(grep -F '"resource":"run","action":"create"' "$TMP/raw" | grep -F "$RUN_ID" \
            | sed -nE "s/.*\[($RE_UUID)\] \[Audit Log\].*/\1/p" | head -1)
